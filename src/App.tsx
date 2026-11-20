@@ -23,8 +23,10 @@ import { FreeAction } from './ui/FreeAction';
 import { Interlude } from './ui/Interlude';
 import { TitleScreen } from './ui/TitleScreen';
 import { EndingScreen } from './ui/EndingScreen';
+import { Guide } from './ui/Guide';
 import { narrate, requestEpilogue } from './ai/client';
 import { RainAudio } from './audio/rain';
+import { GUIDES, readSeenGuides, writeSeenGuides, type GuideKey } from './content/guides';
 
 const story = storyJson as unknown as Story;
 
@@ -82,6 +84,8 @@ export default function App() {
   const [unlocked, setUnlocked] = useState<EndingKey[]>(readUnlocked);
   const [rain] = useState(() => new RainAudio());
   const [soundOn, setSoundOn] = useState(true);
+  const [seenGuides, setSeenGuides] = useState<GuideKey[]>(readSeenGuides);
+  const [guide, setGuide] = useState<{ key: GuideKey; text: string } | null>(null);
 
   const node = state ? story.nodes[state.nodeId] : null;
   const line = node && state ? node.lines[state.lineIndex] : undefined;
@@ -153,7 +157,44 @@ export default function App() {
     };
   }, [finishedAt, endingKey, vars]);
 
+  const dismissGuide = useCallback(() => {
+    if (!guide) return;
+    const key = guide.key;
+    setGuide(null);
+    setSeenGuides((prev) => {
+      if (prev.includes(key)) return prev;
+      const next = [...prev, key];
+      writeSeenGuides(next);
+      return next;
+    });
+  }, [guide]);
+
+  /**
+   * 新手指引：只在玩家第一次遇到某类操作时弹一次。
+   * 优先级 自由行动 > 选项 > 基础点击，保证最需要解释的先出现。
+   */
+  useEffect(() => {
+    if (screen !== 'play' || !state || !node || pending || guide) return;
+
+    const decision = awaitingDecision(state, story);
+    const isFree = decision && Boolean(node.freeAction);
+    const isChoice = decision && Boolean(node.choices?.length);
+
+    if (isFree && !seenGuides.includes('free')) {
+      setGuide({ key: 'free', text: GUIDES.free });
+    } else if (isChoice && !seenGuides.includes('choice')) {
+      setGuide({ key: 'choice', text: GUIDES.choice });
+    } else if (!seenGuides.includes('click')) {
+      setGuide({ key: 'click', text: GUIDES.click });
+    }
+  }, [screen, state, node, pending, guide, seenGuides]);
+
   const handleStageClick = useCallback(() => {
+    // 引导还在时，第一下点击先关引导，避免玩家在没读提示的情况下误推进
+    if (guide) {
+      dismissGuide();
+      return;
+    }
     if (!state || pending || busy) return;
     if (!typewriter.done) {
       typewriter.skip();
@@ -161,7 +202,7 @@ export default function App() {
     }
     if (awaitingDecision(state, story)) return;
     setState(advance(state, story));
-  }, [state, pending, busy, typewriter]);
+  }, [state, pending, busy, typewriter, guide, dismissGuide]);
 
   const handleChoose = useCallback(
     (id: string) => {
@@ -210,6 +251,7 @@ export default function App() {
     resetEpilogue();
     setPending(null);
     setBusy(false);
+    setGuide(null);
     setState(startGame(story));
     setScreen('play');
     if (soundOn) void rain.start();
@@ -218,6 +260,7 @@ export default function App() {
   const continueSave = useCallback(() => {
     if (!save) return;
     resetEpilogue();
+    setGuide(null);
     setState(save.state);
     setScreen('play');
     if (soundOn) void rain.start();
@@ -235,6 +278,7 @@ export default function App() {
     setScreen('title');
     setState(null);
     setPending(null);
+    setGuide(null);
   }, []);
 
   /* ------------------------------- 渲染 ------------------------------- */
@@ -315,6 +359,8 @@ export default function App() {
           onContinue={confirmPending}
         />
       )}
+
+      {guide && <Guide text={guide.text} onClose={dismissGuide} />}
 
       <footer className="app__foot">
         <span>

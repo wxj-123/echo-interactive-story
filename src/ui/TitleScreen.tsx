@@ -46,6 +46,9 @@ export function TitleScreen({ hasSave, unlocked, onStart, onContinue }: Props) {
           ))}
         </div>
 
+        <p className="title__howto">
+          点击推进 · 点一下跳过打字 · 关键处可以自己写行动
+        </p>
         <p className="title__note">
           全程约 30 分钟 · 3 个结局 · 支持中途退出自动存档
         </p>
