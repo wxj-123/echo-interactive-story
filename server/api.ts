@@ -1,8 +1,14 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { story } from './story.ts';
-import { chat, extractJson, readConfig } from './llm.ts';
+import { chat, extractJson, getOllamaState, readConfig } from './llm.ts';
 import type { EndingKey, Vars } from '../src/engine/types';
+import {
+  PREWRITTEN,
+  PREWRITTEN_EPILOGUE,
+  fillEpilogue,
+  pickNarration,
+} from '../src/content/prewritten.ts';
 
 export const api = Router();
 
@@ -44,12 +50,19 @@ function localVerdict(nodeId: string, action: string): { nodeId: string; narrati
 
   const best = scored[0];
   const matched = Boolean(best && best.score > 0.08);
+  const target = matched ? best.id : free.fallback;
+
+  // 二级兜底：预写裁定库（按命中的支线取对应描写），比通用句更像人写的
+  const bank = PREWRITTEN[nodeId];
+  const pool = matched ? bank?.candidates[target] : bank?.fallback;
 
   return {
-    nodeId: matched ? best.id : free.fallback,
-    narration: matched
-      ? '你按自己的方式做了。记忆沿着这条线，往下走了一段。'
-      : '这条路没有走通。你退回来，选了最稳妥的那一条。',
+    nodeId: target,
+    narration:
+      pickNarration(pool) ??
+      (matched
+        ? '你按自己的方式做了。记忆沿着这条线，往下走了一段。'
+        : '这条路没有走通。你退回来，选了最稳妥的那一条。'),
   };
 }
 
@@ -106,11 +119,18 @@ api.post('/narrate', async (req: Request, res: Response) => {
     .join('\n');
 
   const system = [
-    '你是互动影游《回声》的叙事裁判。玩家会写下一个行动，你要判断它把剧情引向哪一条支线。',
-    '严格要求：',
+    '你是互动影游《回声》的叙事裁判。玩家写下一个行动，你判断它通向哪条支线，并写两三句衔接描写。',
+    '',
+    '文风要求（很重要，不遵守会被判为不合格）：',
+    '- 第二人称，短句，白描。只写具体的动作和感官细节。',
+    '- 禁止：比喻、夸张词（猛地/瞬间/踉跄/如利刃悬颈/仿佛/如同）、形容词堆砌、心理独白、感叹号。',
+    '- 单句不超过 25 字，全文 40-70 字。',
+    '- 只写角色采取行动的这几秒，不要写行动的结果，也不要提前写下一场景会发生什么。',
+    '- 参考写法：「你把监控拖进解码器。雨大得看不清人脸。进度条跳了九十秒。」',
+    '',
+    '规则：',
     `1. nodeId 只能从下列候选里选一个，不能编造：${free.allowed.join(', ')}`,
-    '2. narration 是 40-70 字的中文第二人称描写，承接动作、带画面感，不要解释规则，不要出现"选项""分支"这类词。',
-    '3. verdict 只能是 success / partial / fail 之一，表示这个动作的顺利程度。',
+    '2. verdict 只能是 success / partial / fail 之一，表示这个动作的顺利程度。',
     '只输出 JSON，形如：{"nodeId":"...","verdict":"partial","narration":"..."}',
   ].join('\n');
 
@@ -168,22 +188,13 @@ interface EpilogueBody {
   vars?: Vars;
 }
 
-const ROUTE_LABEL: Record<string, string> = {
-  hide: '把修复好的记忆收了起来，决定独自追查',
-  tell: '把屏幕转向了委托人，选择一起面对',
-};
-
-/** 无模型时的模板摘要，保证结局页永远有内容 */
+/** 无模型时的模板摘要：从预写库里随机取一条，保证结局页永远有像样的内容 */
 function localEpilogue(body: EpilogueBody): string {
-  const { vars, endingKey } = body;
-  const route = vars?.route ? ROUTE_LABEL[vars.route] : '没有走到需要选择的那一步';
-  const tone =
-    endingKey === 'yongye'
-      ? '你删掉了自己，把这一夜还给了空白。'
-      : endingKey === 'huisheng'
-        ? '你把真相寄了出去，然后一个人站在原地等回音。'
-        : '你把不属于你的东西还了回去，月台上终于有人等到了答案。';
-  return `档案编号 7F3A 结案摘要：你在修复一段记忆的过程中${route}；共调取记忆碎片 ${vars?.integrity ?? 0} 片。${tone}`;
+  const integrity = body.vars?.integrity ?? 0;
+  const pool = body.endingKey ? PREWRITTEN_EPILOGUE[body.endingKey] : undefined;
+  const template = pickNarration(pool);
+  if (template) return fillEpilogue(template, integrity);
+  return `档案编号 7F3A 结案摘要：本案共调取记忆碎片 ${integrity} 片，材料已归档。`;
 }
 
 api.post('/epilogue', async (req: Request, res: Response) => {
@@ -228,6 +239,8 @@ api.post('/epilogue', async (req: Request, res: Response) => {
 
 api.get('/health', (_req: Request, res: Response) => {
   const cfg = readConfig();
+  const ollama = getOllamaState();
+
   res.json({
     ok: true,
     story: {
@@ -235,6 +248,18 @@ api.get('/health', (_req: Request, res: Response) => {
       nodes: Object.keys(story.nodes).length,
       version: story.meta.version,
     },
-    llm: { enabled: cfg.enabled, model: cfg.enabled ? cfg.model : null },
+    llm: {
+      enabled: cfg.enabled,
+      kind: cfg.kind,
+      model: cfg.enabled ? cfg.model : null,
+      source: cfg.source,
+      ollama: {
+        available: ollama.available,
+        models: ollama.models.slice(0, 5),
+      },
+      note: cfg.enabled
+        ? '模型已接入，自由行动由模型裁定'
+        : '未检测到可用模型，将使用预写裁定库（不影响通关）',
+    },
   });
 });

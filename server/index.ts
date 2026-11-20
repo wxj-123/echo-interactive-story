@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { api } from './api.ts';
+import { probeOllama, readConfig } from './llm.ts';
 
 const app = express();
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -48,5 +49,19 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 app.listen(port, () => {
   const mode = existsSync(dist) ? '生产（托管 dist）' : '开发（仅 API）';
   console.log(`\n  回声 ECHO · API 已就绪  http://localhost:${port}  [${mode}]`);
-  console.log(`  模型：${process.env.LLM_API_KEY ? process.env.LLM_MODEL || 'gpt-4o-mini' : '未配置 Key，将走本地降级'}\n`);
+
+  const cfg = readConfig();
+  if (cfg.enabled) {
+    console.log(`  模型：${cfg.kind} / ${cfg.model}（来源：${cfg.source}）\n`);
+  } else {
+    console.log('  模型：未接入，将使用预写裁定库（不影响通关）');
+    console.log('  接入方式：装 Ollama（零密钥）或配置 LLM_API_KEY，见 README\n');
+  }
+
+  // 顺手探一下本地 Ollama，让后续请求能用上（不阻塞启动）
+  void probeOllama().then((state) => {
+    if (state.available) {
+      console.log(`  检测到本地 Ollama：${state.models.slice(0, 3).join(', ')}\n`);
+    }
+  });
 });

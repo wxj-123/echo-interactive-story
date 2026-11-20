@@ -1,4 +1,9 @@
 import type { EndingKey, Vars } from '../engine/types';
+import {
+  PREWRITTEN_EPILOGUE,
+  fillEpilogue,
+  pickNarration,
+} from '../content/prewritten';
 
 const TIMEOUT_MS = 13000;
 
@@ -61,20 +66,9 @@ export async function requestEpilogue(
   return { text: localEpilogue(endingKey, vars), degraded: true };
 }
 
+/** 前端最后一道兜底：服务端完全不可达时也要有像样的结案摘要 */
 function localEpilogue(endingKey: EndingKey, vars: Vars): string {
-  const route =
-    vars.route === 'hide'
-      ? '把修复好的记忆收了起来，决定独自追查'
-      : vars.route === 'tell'
-        ? '把屏幕转向了委托人，选择一起面对'
-        : '没有走到需要选择的那一步';
-
-  const tail =
-    endingKey === 'yongye'
-      ? '你删掉了自己，把这一夜还给了空白。'
-      : endingKey === 'huisheng'
-        ? '你把真相寄了出去，然后一个人站在原地等回音。'
-        : '你把不属于你的东西还了回去，月台上终于有人等到了答案。';
-
-  return `档案编号 7F3A 结案摘要：你在修复一段记忆的过程中${route}；共调取记忆碎片 ${vars.integrity} 片。${tail}`;
+  const template = pickNarration(PREWRITTEN_EPILOGUE[endingKey]);
+  if (template) return fillEpilogue(template, vars.integrity);
+  return `档案编号 7F3A 结案摘要：本案共调取记忆碎片 ${vars.integrity} 片，材料已归档。`;
 }
